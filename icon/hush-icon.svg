@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- tile -->
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a3a40"/>
+      <stop offset="0.55" stop-color="#1d1d21"/>
+      <stop offset="1" stop-color="#0e0e10"/>
+    </linearGradient>
+    <radialGradient id="tileGlow" cx="0.38" cy="0.3" r="0.75">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="0.25" stop-color="#ffffff" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.02"/>
+    </linearGradient>
+    <filter id="tileShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="18"/>
+      <feOffset dy="18"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.45"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <!-- plush body: soft radial light, darker cushioned edges -->
+    <radialGradient id="plush" cx="0.36" cy="0.28" r="0.9">
+      <stop offset="0" stop-color="#fffdf8"/>
+      <stop offset="0.45" stop-color="#f4ece0"/>
+      <stop offset="0.8" stop-color="#d9cbb7"/>
+      <stop offset="1" stop-color="#b9a68e"/>
+    </radialGradient>
+    <radialGradient id="wave" cx="0.3" cy="0.3" r="0.9">
+      <stop offset="0" stop-color="#f6c7a6"/>
+      <stop offset="0.6" stop-color="#e08f62"/>
+      <stop offset="1" stop-color="#b8653f"/>
+    </radialGradient>
+    <!-- puffy volume: inner shading + specular sheen -->
+    <filter id="puff" x="-30%" y="-30%" width="160%" height="170%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="22" result="blur"/>
+      <feSpecularLighting in="blur" surfaceScale="9" specularConstant="0.75" specularExponent="22" lighting-color="#ffffff" result="spec">
+        <feDistantLight azimuth="235" elevation="52"/>
+      </feSpecularLighting>
+      <feComposite in="spec" in2="SourceAlpha" operator="in" result="specIn"/>
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14" result="b2"/>
+      <feOffset in="b2" dx="-10" dy="-16" result="o2"/>
+      <feComposite in="SourceAlpha" in2="o2" operator="arithmetic" k2="1" k3="-1" result="innerShade"/>
+      <feFlood flood-color="#6b5640" flood-opacity="0.45"/>
+      <feComposite in2="innerShade" operator="in" result="shade"/>
+      <feGaussianBlur in="SourceAlpha" stdDeviation="20" result="ds"/>
+      <feOffset in="ds" dx="0" dy="26" result="dso"/>
+      <feComponentTransfer in="dso" result="drop"><feFuncA type="linear" slope="0.55"/></feComponentTransfer>
+      <feMerge>
+        <feMergeNode in="drop"/>
+        <feMergeNode in="SourceGraphic"/>
+        <feMergeNode in="shade"/>
+        <feMergeNode in="specIn"/>
+      </feMerge>
+    </filter>
+    <filter id="puffSoft" x="-40%" y="-40%" width="180%" height="190%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="12" result="blur"/>
+      <feSpecularLighting in="blur" surfaceScale="6" specularConstant="0.6" specularExponent="18" lighting-color="#fff4ea" result="spec">
+        <feDistantLight azimuth="235" elevation="50"/>
+      </feSpecularLighting>
+      <feComposite in="spec" in2="SourceAlpha" operator="in" result="specIn"/>
+      <feGaussianBlur in="SourceAlpha" stdDeviation="12" result="ds"/>
+      <feOffset in="ds" dy="16" result="dso"/>
+      <feComponentTransfer in="dso" result="drop"><feFuncA type="linear" slope="0.5"/></feComponentTransfer>
+      <feMerge><feMergeNode in="drop"/><feMergeNode in="SourceGraphic"/><feMergeNode in="specIn"/></feMerge>
+    </filter>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="7"/>
+      <feColorMatrix values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.06 0"/>
+    </filter>
+    <filter id="soft" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="1.2"/></filter>
+
+    <clipPath id="tileClip"><rect x="100" y="100" width="824" height="824" rx="186"/></clipPath>
+    <path id="bubble" d="M 300 300
+      C 300 252 338 214 386 214 L 638 214 C 686 214 724 252 724 300
+      L 724 520 C 724 568 686 606 638 606 L 480 606
+      L 352 704 C 334 718 312 706 318 684 L 340 640 C 346 626 348 616 346 606
+      C 318 596 300 562 300 520 Z"/>
+  </defs>
+
+  <!-- tile -->
+  <g filter="url(#tileShadow)">
+    <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#tile)"/>
+  </g>
+  <g clip-path="url(#tileClip)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#tileGlow)"/>
+    <rect x="100" y="100" width="824" height="824" filter="url(#grain)"/>
+  </g>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="185" fill="none" stroke="url(#rim)" stroke-width="3"/>
+
+  <!-- music, fading back: two plush waves to the right -->
+  <g filter="url(#puffSoft)" stroke-linecap="round" fill="none">
+    <path d="M 752 336 Q 820 446 752 556" stroke="url(#wave)" stroke-width="48" opacity="0.95"/>
+    <path d="M 818 282 Q 920 446 818 610" stroke="url(#wave)" stroke-width="38" opacity="0.4"/>
+  </g>
+
+  <!-- the voice: a plush, stitched speech bubble -->
+  <g transform="translate(-40 18)">
+    <use href="#bubble" fill="url(#plush)" filter="url(#puff)"/>
+    <!-- stitching -->
+    <g transform="translate(512 410) scale(0.9) translate(-512 -410)">
+      <use href="#bubble" fill="none" stroke="#a8927a" stroke-opacity="0.55" stroke-width="5"
+           stroke-dasharray="14 12" stroke-linecap="round" filter="url(#soft)"/>
+    </g>
+    <!-- three soft dots: someone is talking -->
+    <g filter="url(#puffSoft)">
+      <circle cx="420" cy="410" r="34" fill="url(#wave)"/>
+      <circle cx="512" cy="410" r="34" fill="url(#wave)"/>
+      <circle cx="604" cy="410" r="34" fill="url(#wave)"/>
+    </g>
+  </g>
+</svg>
