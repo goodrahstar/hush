@@ -161,10 +161,12 @@ enum SelfTest {
         let states: [(String, PanelState)] = [
             ("listening", PanelState(phase: .listening, music: 0.82, voice: 0.12, threshold: 0.55, volume: 0.62, duckedFrom: nil, problem: nil, micName: "macbook pro microphone", ducks: 3)),
             ("ducked", PanelState(phase: .ducked, music: 0.78, voice: 0.91, threshold: 0.55, volume: 0.19, duckedFrom: 0.62, problem: nil, micName: "macbook pro microphone", ducks: 4)),
+            ("off", PanelState(phase: .off, music: 0.8, voice: 0.1, threshold: 0.55, volume: 0.62, duckedFrom: nil, problem: nil, micName: "macbook pro microphone", ducks: 4)),
             ("problem", PanelState(phase: .quiet, music: 0, voice: 0, threshold: 0.55, volume: 0.5, duckedFrom: nil, problem: "can't hear what's playing. allow it in system settings › privacy › screen & system audio recording.", micName: "", ducks: 0)),
         ]
         for (name, state) in states {
-            let view = PanelBody(state: state, settings: .constant(DuckSettings()), preferBuiltInMic: .constant(true),
+            var st = DuckSettings(); st.enabled = state.phase != .off
+            let view = PanelBody(state: state, settings: .constant(st), preferBuiltInMic: .constant(true),
                                  opensAtLogin: .constant(false), quit: {})
             let renderer = ImageRenderer(content: view)
             renderer.scale = 2

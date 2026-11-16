@@ -49,6 +49,7 @@ struct PanelBody: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            PowerCard(isOn: $settings.enabled)
             header
             meters
             if let problem = state.problem {
@@ -122,8 +123,6 @@ struct PanelBody: View {
 
     private var controls: some View {
         VStack(spacing: 0) {
-            ToggleRow(title: "lower music when people talk", isOn: $settings.enabled)
-            Divider().overlay(Ink.line)
             SliderRow(title: "lower to", value: $settings.duckTo, range: 0.1...0.7, step: 0.05,
                       display: "\(Int((settings.duckTo * 100).rounded()))% of volume")
             Divider().overlay(Ink.line)
@@ -192,6 +191,67 @@ private struct MeterRow: View {
                 .foregroundStyle(Ink.ink)
                 .frame(width: 24, alignment: .trailing)
         }
+    }
+}
+
+/// The one big on/off control. Green when Hush is working, red when it's paused.
+private struct PowerCard: View {
+    @Binding var isOn: Bool
+    static let green = Color(red: 0.204, green: 0.780, blue: 0.349) // #34c759
+    static let red = Color(red: 1.0, green: 0.231, blue: 0.188)     // #ff3b30
+
+    var body: some View {
+        Button { isOn.toggle() } label: {
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(isOn ? "on" : "off")
+                        .font(.system(size: 28, weight: .semibold))
+                        .tracking(-1)
+                        .foregroundStyle(isOn ? Self.green : Self.red)
+                        .contentTransition(.numericText())
+                    Text(isOn ? "lowering music when people talk" : "music stays where you put it")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Ink.ink3)
+                }
+                Spacer(minLength: 8)
+                BigSwitch(isOn: isOn)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .frame(maxWidth: .infinity)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Ink.surface))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke((isOn ? Self.green : Self.red).opacity(0.35), lineWidth: 1.5))
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.space, modifiers: [])
+        .accessibilityLabel("hush")
+        .accessibilityValue(isOn ? "on" : "off")
+        .animation(.spring(response: 0.35, dampingFraction: 0.72), value: isOn)
+    }
+}
+
+private struct BigSwitch: View {
+    var isOn: Bool
+
+    var body: some View {
+        ZStack(alignment: isOn ? .trailing : .leading) {
+            Capsule()
+                .fill(isOn ? PowerCard.green : PowerCard.red)
+                .frame(width: 76, height: 42)
+            HStack(spacing: 0) {
+                if isOn { Text("on").padding(.leading, 12); Spacer() } else { Spacer(); Text("off").padding(.trailing, 10) }
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 76, height: 42)
+            Circle()
+                .fill(.white)
+                .frame(width: 34, height: 34)
+                .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+                .padding(4)
+        }
+        .frame(width: 76, height: 42)
     }
 }
 

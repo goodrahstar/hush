@@ -7,7 +7,7 @@ import ServiceManagement
 final class Controller: ObservableObject {
     static let shared = Controller()
 
-    @Published var settings: DuckSettings { didSet { save() } }
+    @Published var settings: DuckSettings { didSet { save(); if settings.enabled != oldValue.enabled { applyEnabled() } } }
     @Published var preferBuiltInMic: Bool { didSet { UserDefaults.standard.set(preferBuiltInMic, forKey: "preferBuiltInMic"); restartMic() } }
     @Published private(set) var phase: Phase = .quiet
     @Published private(set) var music = 0.0
@@ -27,6 +27,7 @@ final class Controller: ObservableObject {
     private var timer: DispatchSourceTimer?
     private var ramp: Task<Void, Never>?
     private var lastWritten: Float?
+    private var duckedDevice = AudioDeviceID(0)
     private var userTookOver = false
     private var outputListener: AudioObjectPropertyListenerBlock?
     private let defaults = UserDefaults.standard
@@ -54,7 +55,7 @@ final class Controller: ObservableObject {
         recoverFromCrash()
         tap.onHeard = { [weak self] h in Task { @MainActor in self?.lastSystem = (h, Date()) } }
         mic.onHeard = { [weak self] h in Task { @MainActor in self?.lastMic = (h, Date()) } }
-        startTap()
+        if settings.enabled { startTap() } else { log("off at launch: not listening") }
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             Task { @MainActor in
                 self.log("mic permission granted=\(granted)")
@@ -73,17 +74,33 @@ final class Controller: ObservableObject {
 
     func shutdown() {
         timer?.cancel()
-        if let from = duckedFrom, !userTookOver { SystemVolume.set(Float(from)) }
+        if let from = duckedFrom, !userTookOver { SystemVolume.set(Float(from), duckedDevice != 0 ? duckedDevice : CA.defaultOutputDevice) }
         defaults.removeObject(forKey: "savedVolume")
         tap.stop(); mic.stop()
     }
 
+    /// Off means off: the mic and the system listener are fully released, so the mic light goes out.
+    private func applyEnabled() {
+        if settings.enabled {
+            log("turned on: listening again")
+            startTap()
+            if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { restartMic() }
+        } else {
+            log("turned off: mic and system listening stopped")
+            tap.stop(); mic.stop()
+            lastSystem = nil; lastMic = nil
+            micName = ""
+        }
+    }
+
     private func startTap() {
+        guard settings.enabled else { return }
         do { try tap.start(); if problem?.hasPrefix("can't hear") == true { problem = nil } }
         catch { log("tap error \(error)"); problem = "can't hear what's playing: \(error.localizedDescription). allow it in system settings › privacy › screen & system audio recording." }
     }
 
     private func restartMic() {
+        guard settings.enabled else { mic.stop(); return }
         do { try mic.start(preferBuiltIn: preferBuiltInMic); micName = mic.deviceName.lowercased() }
         catch { log("mic error \(error)"); problem = "can't use the microphone: \(error.localizedDescription)" }
     }
@@ -95,6 +112,10 @@ final class Controller: ObservableObject {
                 guard let self else { return }
                 // Headphones in or out: put the old device back first, then listen to the new one.
                 self.ramp?.cancel()
+                if let from = self.duckedFrom, !self.userTookOver, self.duckedDevice != 0 {
+                    SystemVolume.set(Float(from), self.duckedDevice)
+                    self.log("output changed while ducked: restored \(CA.name(self.duckedDevice)) to \(from)")
+                }
                 self.duckedFrom = nil; self.userTookOver = false
                 self.defaults.removeObject(forKey: "savedVolume")
                 self.engine = DecisionEngine()
@@ -139,6 +160,7 @@ final class Controller: ObservableObject {
     private func duck(from current: Double) {
         guard SystemVolume.canSet() else { problem = "this output can't change volume from the mac."; return }
         duckedFrom = current
+        duckedDevice = CA.defaultOutputDevice
         userTookOver = false
         ducksToday += 1
         defaults.set(current, forKey: "savedVolume")

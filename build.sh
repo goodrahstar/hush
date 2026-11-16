@@ -18,4 +18,5 @@ if [[ "${1:-}" != "--no-install" ]]; then
   rm -rf /Applications/Hush.app
   cp -R "$APP" /Applications/Hush.app
   echo "installed /Applications/Hush.app"
+  for _ in 1 2 3; do sleep 1; open /Applications/Hush.app 2>/dev/null && break; done
 fi
