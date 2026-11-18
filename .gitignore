@@ -5,3 +5,5 @@ icon/AppIcon.iconset/
 *.xcodeproj/
 .swiftpm/
 .claude/
+GATES.md
+.unlazy/

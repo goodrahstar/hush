@@ -21,6 +21,10 @@ struct PanelState {
     var problem: String?
     var micName: String
     var ducks: Int
+    var content: Content = .none
+    var talk: Double = 0
+    var pauses: Int = 0
+    var echoCancelling = false
 }
 
 struct PanelView: View {
@@ -31,7 +35,9 @@ struct PanelView: View {
             state: PanelState(phase: controller.phase, music: controller.music, voice: controller.voice,
                               threshold: controller.threshold, volume: controller.volume,
                               duckedFrom: controller.duckedFrom, problem: controller.problem,
-                              micName: controller.micName, ducks: controller.ducksToday),
+                              micName: controller.micName, ducks: controller.ducksToday,
+                              content: controller.content, talk: controller.talk, pauses: controller.pausesToday,
+                              echoCancelling: controller.echoCancelling),
             settings: $controller.settings,
             preferBuiltInMic: $controller.preferBuiltInMic,
             opensAtLogin: Binding(get: { controller.opensAtLogin }, set: { controller.opensAtLogin = $0 }),
@@ -87,18 +93,23 @@ struct PanelBody: View {
 
     private var headline: Text {
         switch state.phase {
-        case .off: return Text("hush is ") + Text("paused.").italic().fontWeight(.medium)
+        case .off: return Text("hush is ") + Text("off.").italic().fontWeight(.medium)
         case .quiet: return Text("nothing ") + Text("playing.").italic().fontWeight(.medium)
+        case .listening where state.content == .talk: return Text("talk on. ") + Text("listening.").italic().fontWeight(.medium)
         case .listening: return Text("music on. ") + Text("listening.").italic().fontWeight(.medium)
         case .ducked: return Text("someone's ") + Text("talking.").italic().fontWeight(.medium)
+        case .paused: return Text("someone's talking. ") + Text("paused.").italic().fontWeight(.medium)
         }
     }
 
     private var subline: String {
         switch state.phase {
-        case .off: return "turn it on to lower music when people talk."
-        case .quiet: return "hush wakes up when music starts."
+        case .off: return "turn it on to step in when people talk."
+        case .quiet: return settings.pauseTalk ? "hush wakes up when music or a podcast starts." : "hush wakes up when music starts."
+        case .listening where state.content == .talk:
+            return state.echoCancelling ? "pauses the moment someone speaks · speaker echo removed" : "pauses the moment someone speaks."
         case .listening: return "music drops the moment someone speaks."
+        case .paused: return "plays again after \(fmt(settings.holdSeconds)) s of quiet"
         case .ducked:
             let from = Int(((state.duckedFrom ?? state.volume) * 100).rounded())
             return "music down from \(from)% to \(pct(state.volume)) · back after \(fmt(settings.holdSeconds)) s of quiet"
@@ -107,7 +118,11 @@ struct PanelBody: View {
 
     private var meters: some View {
         VStack(spacing: 12) {
-            MeterRow(label: "music", value: state.music, mark: 0.3)
+            if state.content == .talk {
+                MeterRow(label: "talk", value: state.talk, mark: 0.5)
+            } else {
+                MeterRow(label: "music", value: state.music, mark: 0.3)
+            }
             MeterRow(label: "voice", value: state.voice, mark: state.threshold)
             HStack {
                 Text("volume").foregroundStyle(Ink.ink3)
@@ -132,6 +147,8 @@ struct PanelBody: View {
             SliderRow(title: "bring music back after", value: $settings.holdSeconds, range: 1...8, step: 0.5,
                       display: "\(fmt(settings.holdSeconds)) s of quiet")
             Divider().overlay(Ink.line)
+            ToggleRow(title: "pause podcasts and videos", detail: "instead of lowering them", isOn: $settings.pauseTalk)
+            Divider().overlay(Ink.line)
             ToggleRow(title: "use the mac's own mic", detail: "keeps airpods in full-quality sound", isOn: $preferBuiltInMic)
             Divider().overlay(Ink.line)
             ToggleRow(title: "open at login", isOn: $opensAtLogin)
@@ -153,8 +170,8 @@ struct PanelBody: View {
     }
 
     private var footerText: String {
-        let mic = state.micName.isEmpty ? "" : state.micName.contains("macbook") || state.micName.contains("built-in") ? " · built-in mic" : " · \(state.micName)"
-        return "on device\(mic) · \(state.ducks) ducked"
+        let mic = state.micName.isEmpty ? "on device" : state.micName.contains("macbook") || state.micName.contains("built-in") ? "mac mic" : state.micName
+        return "\(mic) · \(state.ducks) ducked · \(state.pauses) paused"
     }
 
     private func pct(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }
@@ -209,8 +226,10 @@ private struct PowerCard: View {
                         .tracking(-1)
                         .foregroundStyle(isOn ? Self.green : Self.red)
                         .contentTransition(.numericText())
-                    Text(isOn ? "lowering music when people talk" : "music stays where you put it")
+                    Text(isOn ? "steps in when people talk" : "not listening")
                         .font(.system(size: 12))
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                         .foregroundStyle(Ink.ink3)
                 }
                 Spacer(minLength: 8)

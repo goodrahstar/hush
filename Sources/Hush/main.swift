@@ -20,6 +20,7 @@ struct HushApp: App {
         case .quiet: return "speaker"
         case .listening: return "speaker.wave.2"
         case .ducked: return "speaker.wave.1"
+        case .paused: return "pause.circle"
         }
     }
 }
@@ -34,7 +35,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 let args = CommandLine.arguments
-if args.contains("--selftest") {
+if args.contains("--ec-helper") {
+    EchoHelper.run()
+} else if args.contains("--selftest") {
     exit(MainActor.assumeIsolated { SelfTest.run(Array(args.dropFirst())) })
 } else {
     HushApp.main()

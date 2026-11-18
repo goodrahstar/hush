@@ -149,6 +149,77 @@ final class MicListener {
     deinit { stop() }
 }
 
+/// The mic with Apple's voice processing on: echo cancellation removes what the Mac's own speakers
+/// play, so a podcast on the speakers doesn't sound like someone in the room. Measured on a MacBook Pro
+/// at 50% volume: speaker leak drops from −32 dB to −59 dB and its speech score from 0.90 to 0.09.
+/// It always uses the default input device (voice processing has no device choice), and it's only used
+/// while spoken content plays on speakers.
+final class EchoCancelledMic {
+    var onHeard: ((Heard) -> Void)?
+    /// Called (on an arbitrary thread) when the audio hardware changes under the engine.
+    var onConfigurationChange: (() -> Void)?
+    private(set) var deviceName = ""
+    private(set) var running = false
+    private(set) var classifier: SoundClassifier?
+    private var engine: AVAudioEngine?
+    private var observer: NSObjectProtocol?
+
+    func start() throws {
+        stop()
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        try input.setVoiceProcessingEnabled(true)
+        // Don't turn other apps down while we listen (voice processing ducks other audio by default).
+        input.voiceProcessingOtherAudioDuckingConfiguration =
+            AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+        input.isVoiceProcessingAGCEnabled = false
+
+        let format = input.outputFormat(forBus: 0)
+        guard format.channelCount > 0, format.sampleRate > 0 else { throw HushError.message("echo-cancelled mic has no audio") }
+        let classifier = try SoundClassifier(sampleRate: format.sampleRate, label: "mic-ec")
+        classifier.onHeard = { [weak self] in self?.onHeard?($0) }
+        let mono = classifier.format
+
+        // Channel 0 is the processed (echo-cancelled) voice; the other channels are raw mics. Never mix them in.
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { buf, _ in
+            let frames = Int(buf.frameLength)
+            guard frames > 0, let src = buf.floatChannelData?[0],
+                  let out = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: AVAudioFrameCount(frames)) else { return }
+            out.frameLength = AVAudioFrameCount(frames)
+            let dst = out.floatChannelData![0]
+            var sum: Float = 0
+            for i in 0..<frames { let s = src[i]; dst[i] = s; sum += s * s }
+            classifier.feed(out, rms: (sum / Float(frames)).squareRoot())
+        }
+        observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine,
+                                                          queue: nil) { [weak self] _ in self?.onConfigurationChange?() }
+        engine.prepare()
+        do { try engine.start() } catch {
+            input.removeTap(onBus: 0)
+            throw HushError.message("could not start the echo-cancelled mic: \(error.localizedDescription)")
+        }
+        self.engine = engine
+        self.classifier = classifier
+        deviceName = CA.name(CA.defaultInputDevice)
+        running = true
+    }
+
+    func stop() {
+        running = false
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = nil
+        if let engine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            try? engine.inputNode.setVoiceProcessingEnabled(false)
+        }
+        engine = nil
+        classifier = nil
+    }
+
+    deinit { stop() }
+}
+
 enum HushError: LocalizedError {
     case coreAudio(String, OSStatus)
     case message(String)

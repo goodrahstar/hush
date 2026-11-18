@@ -18,10 +18,23 @@ final class Controller: ObservableObject {
     @Published private(set) var problem: String?
     @Published private(set) var micName = ""
     @Published private(set) var ducksToday = 0
+    @Published private(set) var pausesToday = 0
+    @Published private(set) var content: Content = .none
+    @Published private(set) var talk = 0.0
+    @Published private(set) var echoCancelling = false
 
     private var engine = DecisionEngine()
     private let tap = SystemAudioTap()
     private let mic = MicListener()
+    private let ecMic = EchoCancelledMicProcess() // a child process: voice processing silences taps in-process
+    /// Echo cancellation is used only while spoken content plays on speakers; plain mic otherwise.
+    private var wantEchoCancel = false
+    private var notTalkFor = 0.0
+    private var outputLeaks = true
+    private var ignoreMicUntil = Date.distantPast
+    private var ecSettling = false
+    private var micStarting = false
+    private var micDownFor = 0.0
     private var lastSystem: (Heard, Date)?
     private var lastMic: (Heard, Date)?
     private var timer: DispatchSourceTimer?
@@ -39,6 +52,7 @@ final class Controller: ObservableObject {
         if d.object(forKey: "duckTo") != nil { s.duckTo = d.double(forKey: "duckTo") }
         if d.object(forKey: "sensitivity") != nil { s.sensitivity = d.double(forKey: "sensitivity") }
         if d.object(forKey: "holdSeconds") != nil { s.holdSeconds = d.double(forKey: "holdSeconds") }
+        if d.object(forKey: "pauseTalk") != nil { s.pauseTalk = d.bool(forKey: "pauseTalk") }
         settings = s
         preferBuiltInMic = d.object(forKey: "preferBuiltInMic") == nil ? true : d.bool(forKey: "preferBuiltInMic")
     }
@@ -54,7 +68,17 @@ final class Controller: ObservableObject {
                                                          reason: "listening for voices over music")
         recoverFromCrash()
         tap.onHeard = { [weak self] h in Task { @MainActor in self?.lastSystem = (h, Date()) } }
-        mic.onHeard = { [weak self] h in Task { @MainActor in self?.lastMic = (h, Date()) } }
+        mic.onHeard = { [weak self] h in Task { @MainActor in self?.heardMic(h, echoCancelled: false) } }
+        ecMic.onHeard = { [weak self] h in Task { @MainActor in self?.heardMic(h, echoCancelled: true) } }
+        ecMic.onUnexpectedExit = { [weak self] status, why in
+            Task { @MainActor in
+                guard let self, self.echoCancelling else { return }
+                self.log("echo-cancelled mic stopped (\(status): \(why)), restarting")
+                self.restartMic()
+            }
+        }
+        outputLeaks = CA.outputReachesRoom(CA.defaultOutputDevice)
+        log("output \(CA.name(CA.defaultOutputDevice)) reaches the room: \(outputLeaks) · media control: \(MediaControl.available)")
         if settings.enabled { startTap() } else { log("off at launch: not listening") }
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             Task { @MainActor in
@@ -75,8 +99,10 @@ final class Controller: ObservableObject {
     func shutdown() {
         timer?.cancel()
         if let from = duckedFrom, !userTookOver { SystemVolume.set(Float(from), duckedDevice != 0 ? duckedDevice : CA.defaultOutputDevice) }
+        if engine.phase == .paused { resumePlayback(reason: "hush quit") }
         defaults.removeObject(forKey: "savedVolume")
-        tap.stop(); mic.stop()
+        let tap = self.tap, mic = self.mic, ecMic = self.ecMic
+        audioQueue.sync { tap.stop(); mic.stop(); ecMic.stop() }
     }
 
     /// Off means off: the mic and the system listener are fully released, so the mic light goes out.
@@ -87,22 +113,105 @@ final class Controller: ObservableObject {
             if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { restartMic() }
         } else {
             log("turned off: mic and system listening stopped")
-            tap.stop(); mic.stop()
+            let tap = self.tap, mic = self.mic, ecMic = self.ecMic
+            audioQueue.async { tap.stop(); mic.stop(); ecMic.stop() }
             lastSystem = nil; lastMic = nil
-            micName = ""
+            micName = ""; echoCancelling = false
         }
     }
 
+    // Core Audio start/stop can block for a long time (the HAL waits on device changes),
+    // so it never runs on the main thread: the menu must stay responsive.
+    private let audioQueue = DispatchQueue(label: "hush.audio.control", qos: .userInitiated)
+
     private func startTap() {
         guard settings.enabled else { return }
-        do { try tap.start(); if problem?.hasPrefix("can't hear") == true { problem = nil } }
-        catch { log("tap error \(error)"); problem = "can't hear what's playing: \(error.localizedDescription). allow it in system settings › privacy › screen & system audio recording." }
+        let tap = self.tap, queue = audioQueue
+        queue.async { [weak self] in
+            let t0 = Date()
+            var failure: Error?
+            do { try tap.start() } catch { failure = error }
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let failure {
+                    self.log("tap error \(failure)")
+                    self.problem = "can't hear what's playing: \(failure.localizedDescription). allow it in system settings › privacy › screen & system audio recording."
+                } else {
+                    self.log("system listening started in \(ms) ms")
+                    if self.problem?.hasPrefix("can't hear") == true { self.problem = nil }
+                    if !self.settings.enabled { queue.async { tap.stop() } } // switched off while starting
+                }
+            }
+        }
     }
 
+    /// Starts the right mic for the moment: echo-cancelled while spoken content plays on speakers
+    /// (and the default input is the mic we'd use anyway), the plain mic otherwise. Only one runs at a time.
     private func restartMic() {
-        guard settings.enabled else { mic.stop(); return }
-        do { try mic.start(preferBuiltIn: preferBuiltInMic); micName = mic.deviceName.lowercased() }
-        catch { log("mic error \(error)"); problem = "can't use the microphone: \(error.localizedDescription)" }
+        let useEC = wantEchoCancel && settings.enabled && outputLeaks && ecMicMatchesPreferred
+        let mic = self.mic, ecMic = self.ecMic, queue = audioQueue
+        let enabled = settings.enabled, preferBuiltIn = preferBuiltInMic
+        micStarting = true
+        lastMic = nil
+        ecSettling = false
+        ignoreMicUntil = useEC ? .distantFuture : Date().addingTimeInterval(0.5) // EC: set from its first result
+        queue.async { [weak self] in
+            guard enabled else { mic.stop(); ecMic.stop(); return }
+            let t0 = Date()
+            var failure: Error?
+            // Right after voice processing lets go of the mic, the device can refuse to start for a moment.
+            for attempt in 0..<4 {
+                if attempt > 0 { Thread.sleep(forTimeInterval: 0.6) }
+                failure = nil
+                if useEC {
+                    mic.stop()
+                    do { try ecMic.start() } catch { failure = error }
+                } else {
+                    ecMic.stop()
+                    do { try mic.start(preferBuiltIn: preferBuiltIn) } catch { failure = error }
+                }
+                if failure == nil { break }
+            }
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            let name = (useEC ? ecMic.deviceName : mic.deviceName).lowercased()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.micStarting = false
+                if let failure {
+                    self.echoCancelling = false
+                    self.log("mic error (\(useEC ? "echo-cancelled" : "plain")) \(failure)")
+                    if useEC {
+                        // Fall back to the plain mic; talk detection just won't work over speakers.
+                        self.wantEchoCancel = false
+                        self.restartMic()
+                    } else {
+                        self.problem = "can't use the microphone: \(failure.localizedDescription)"
+                    }
+                } else if self.settings.enabled {
+                    self.log("\(useEC ? "echo-cancelled" : "plain") mic started in \(ms) ms (\(name))")
+                    if self.problem?.hasPrefix("can't use the microphone") == true { self.problem = nil }
+                    self.micName = name
+                    self.echoCancelling = useEC
+                } else {
+                    queue.async { mic.stop(); ecMic.stop() } // switched off while starting
+                }
+            }
+        }
+    }
+
+    /// Voice processing always uses the default input. Use it only if that is the mic Hush would pick.
+    private var ecMicMatchesPreferred: Bool {
+        guard preferBuiltInMic, let builtIn = CA.builtInMicrophone else { return true }
+        return CA.defaultInputDevice == builtIn
+    }
+
+    private func heardMic(_ h: Heard, echoCancelled: Bool) {
+        guard echoCancelled == echoCancelling else { return }
+        // Echo cancellation needs ~2.5 s of playback to converge (measured), counted from its first result.
+        if echoCancelled && !ecSettling { ecSettling = true; ignoreMicUntil = Date().addingTimeInterval(3) }
+        guard Date() >= ignoreMicUntil else { return }
+        lastMic = (h, Date())
     }
 
     private func watchOutputDevice() {
@@ -118,8 +227,12 @@ final class Controller: ObservableObject {
                 }
                 self.duckedFrom = nil; self.userTookOver = false
                 self.defaults.removeObject(forKey: "savedVolume")
+                if self.engine.phase == .paused { self.resumePlayback(reason: "output changed") }
                 self.engine = DecisionEngine()
+                self.outputLeaks = CA.outputReachesRoom(CA.defaultOutputDevice)
+                self.log("output now \(CA.name(CA.defaultOutputDevice)), reaches the room: \(self.outputLeaks)")
                 self.startTap()
+                self.updateMicPath(force: true)
             }
         }
         outputListener = block
@@ -142,19 +255,77 @@ final class Controller: ObservableObject {
         }
 
         let userVolume = muted ? 0 : (duckedFrom ?? current)
-        let action = engine.step(dt: 0.1, system: sys, mic: room, volume: userVolume, settings: settings)
+        let path: MicPath = !outputLeaks ? .headphones : echoCancelling ? .echoCancelled : .speakersRaw
+        let before = engine.phase
+        let action = engine.step(dt: 0.1, system: sys, mic: room, volume: userVolume, settings: settings, micPath: path)
         switch action {
-        case .duck: duck(from: current)
+        case .duck:
+            if before == .paused { log("the player ignored the pause: lowering the volume instead") }
+            duck(from: current)
         case .restore: restore()
-        case .none: break
+        case .pause: pausePlayback()
+        case .resume: resumePlayback(reason: "room quiet")
+        case .none:
+            if before == .paused && engine.phase == .listening { log("playback started again by someone else: hush steps back") }
         }
+        lastSys = sys
+        updateMicPath(force: false)
+        micWatchdog()
 
         logStatus(sys: sys, room: room, volume: current)
         phase = engine.phase
         music = engine.music
+        talk = engine.outputSpeech
+        content = engine.content
         voice = engine.voice
         threshold = engine.threshold(settings)
         volume = current
+    }
+
+    private var lastSys: Heard?
+
+    /// Switch to the echo-cancelled mic while spoken content plays on speakers; back to the plain mic
+    /// 15 s after it stops. Never switches mid-action, so a pause or duck always ends on the same mic.
+    private func updateMicPath(force: Bool) {
+        guard settings.enabled, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        let talkPlaying = settings.pauseTalk && engine.content == .talk && outputLeaks
+        // A podcast Hush paused is still "talk": don't count the pause toward switching back.
+        notTalkFor = talkPlaying || engine.phase == .paused ? 0 : notTalkFor + 0.1
+        let want = talkPlaying ? true : (notTalkFor >= 15 ? false : wantEchoCancel)
+        guard force || want != wantEchoCancel else { return }
+        guard force || engine.phase == .listening || engine.phase == .quiet else { return }
+        wantEchoCancel = want && outputLeaks && settings.pauseTalk
+        if force || wantEchoCancel != echoCancelling {
+            log(wantEchoCancel ? "spoken content on speakers: switching to the echo-cancelled mic" : "switching back to the plain mic")
+            restartMic()
+        }
+    }
+
+    /// Hush is on but no mic is running (a start failed, or the helper died): try again every 5 s.
+    private func micWatchdog() {
+        let up = mic.running || ecMic.running
+        guard settings.enabled, !up, !micStarting,
+              AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { micDownFor = 0; return }
+        micDownFor += 0.1
+        if micDownFor >= 5 {
+            micDownFor = 0
+            log("no mic running: starting it again")
+            restartMic()
+        }
+    }
+
+    private func pausePlayback() {
+        let ok = MediaControl.pausePlayback()
+        pausesToday += 1
+        log("someone's talking over spoken content: pause sent (\(ok ? "ok" : "failed"))")
+    }
+
+    /// Play again only if the output is still quiet: if someone already pressed play, leave it alone.
+    private func resumePlayback(reason: String) {
+        let silent = (lastSys?.level ?? -120) <= -65
+        guard silent else { log("resume skipped (\(reason)): something is already playing"); return }
+        let ok = MediaControl.resumePlayback()
+        log("resume sent (\(reason)) (\(ok ? "ok" : "failed"))")
     }
 
     private func duck(from current: Double) {
@@ -216,14 +387,18 @@ final class Controller: ObservableObject {
             guard let h else { return "none" }
             return String(format: "speech %.2f music %.2f sing %.2f level %.0fdB", h.speech, h.music, h.singing, h.level)
         }
-        log(String(format: "%@ | out[%@] mic[%@] | music %.2f outVoice %.2f voice %.2f thr %.2f base %.2f vol %.2f tap %@ mic %@",
-                   "\(engine.phase)", f(sys), f(room), engine.music, engine.outputVoice, engine.voice,
+        log(String(format: "%@ %@%@ | out[%@] mic[%@] | music %.2f outVoice %.2f voice %.2f thr %.2f base %.2f vol %.2f tap %@ mic %@",
+                   "\(engine.phase)", "\(engine.content)", echoCancelling ? " ec" : "", f(sys), f(room), engine.music, engine.outputVoice, engine.voice,
                    engine.threshold(settings), engine.baseline, volume,
                    tapRunning ? "on(\(tap.classifier?.buffersFed ?? 0)/\(tap.classifier?.windowsHeard ?? 0))" : "off",
-                   micRunning ? "on(\(mic.classifier?.buffersFed ?? 0)/\(mic.classifier?.windowsHeard ?? 0))" : "off"))
+                   micStatus))
     }
     private var tapRunning: Bool { tap.running }
-    private var micRunning: Bool { mic.running }
+    private var micStatus: String {
+        if ecMic.running { return "ec(\(ecMic.linesHeard))" }
+        if mic.running { return "on(\(mic.classifier?.buffersFed ?? 0)/\(mic.classifier?.windowsHeard ?? 0))" }
+        return "off"
+    }
 
     /// If Hush was killed while ducked, put the volume back on next launch.
     private func recoverFromCrash() {
@@ -238,6 +413,7 @@ final class Controller: ObservableObject {
         defaults.set(settings.duckTo, forKey: "duckTo")
         defaults.set(settings.sensitivity, forKey: "sensitivity")
         defaults.set(settings.holdSeconds, forKey: "holdSeconds")
+        defaults.set(settings.pauseTalk, forKey: "pauseTalk")
     }
 
     // MARK: open at login

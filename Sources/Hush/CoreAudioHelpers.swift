@@ -63,6 +63,20 @@ enum CA {
         return t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE
     }
 
+    /// Whether what this output plays reaches the room (and the mic). Headphones don't; speakers do.
+    /// Bluetooth is assumed to be headphones (AirPods); the built-in output counts as headphones when
+    /// something is plugged into the jack.
+    static func outputReachesRoom(_ device: AudioDeviceID) -> Bool {
+        if isBluetooth(device) { return false }
+        if transport(device) == kAudioDeviceTransportTypeBuiltIn,
+           let source = get(device, address(kAudioDevicePropertyDataSource, kAudioObjectPropertyScopeOutput), UInt32(0)),
+           source == 0x6864_706E /* 'hdpn' */ {
+            return false
+        }
+        let n = name(device).lowercased()
+        return !(n.contains("headphone") || n.contains("airpods") || n.contains("buds"))
+    }
+
     static func name(_ device: AudioDeviceID) -> String {
         getString(device, kAudioObjectPropertyName) ?? "unknown device"
     }
